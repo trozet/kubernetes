@@ -72,9 +72,9 @@ var _ = SIGDescribe("NetworkPolicy [LinuxOnly]", func() {
 			testCanConnect(f, f.Namespace, "client-can-connect-81", service, 81)
 		})
 
-		ginkgo.AfterEach(func() {
-			cleanupServerPodAndService(f, podServer, service)
-		})
+		//ginkgo.AfterEach(func() {
+		//	cleanupServerPodAndService(f, podServer, service)
+		//})
 
 		ginkgo.It("should support a 'default-deny' policy [Feature:NetworkPolicy]", func() {
 			policy := &networkingv1.NetworkPolicy{
@@ -94,6 +94,64 @@ var _ = SIGDescribe("NetworkPolicy [LinuxOnly]", func() {
 			// Create a pod with name 'client-cannot-connect', which will attempt to communicate with the server,
 			// but should not be able to now that isolation is on.
 			testCannotConnect(f, f.Namespace, "client-cannot-connect", service, 80)
+		})
+
+		ginkgo.It("TROZET [Feature:NetworkPolicy]", func() {
+			nsA := f.Namespace
+			nsBName := f.BaseName + "-b"
+			nsB, err := f.CreateNamespace(nsBName, map[string]string{
+				"ns-name": nsBName,
+			})
+			framework.ExpectNoError(err, "Error occurred while creating namespace-b.")
+
+			// All communication should be possible before applying the policy.
+			// All communication should be possible before applying the policy.
+			ginkgo.By("Creating client-a, in server's namespace, which should be able to contact the server.", func() {
+				testCanConnect(f, nsA, "client-a", service, 80)
+			})
+			ginkgo.By("Creating client-b, in server's namespace, which should be able to contact the server.", func() {
+				testCanConnect(f, nsA, "client-b", service, 80)
+			})
+			ginkgo.By("Creating client-a, not in server's namespace, which should be able to contact the server.", func() {
+				testCanConnect(f, nsB, "client-a", service, 80)
+			})
+
+
+			policy := &networkingv1.NetworkPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "allow-client-a-via-pod-selector-with-match-expressions",
+				},
+				Spec: networkingv1.NetworkPolicySpec{
+					PodSelector: metav1.LabelSelector{
+						MatchLabels: map[string]string{
+							"pod-name": podServerLabelSelector,
+						},
+					},
+					Ingress: []networkingv1.NetworkPolicyIngressRule{{
+						From: []networkingv1.NetworkPolicyPeer{{
+							PodSelector: &metav1.LabelSelector{
+								MatchExpressions: []metav1.LabelSelectorRequirement{{
+									Key:      "pod-name",
+									Operator: metav1.LabelSelectorOpIn,
+									Values:   []string{"client-a"},
+								}},
+							},
+						}},
+					}},
+				},
+			}
+
+			policy, err = f.ClientSet.NetworkingV1().NetworkPolicies(f.Namespace.Name).Create(policy)
+			framework.ExpectNoError(err, "Error creating Network Policy %v: %v", policy.ObjectMeta.Name, err)
+			defer cleanupNetworkPolicy(f, policy)
+
+			ginkgo.By("Creating client-a which should be able to contact the server.", func() {
+				testCanConnect(f, f.Namespace, "client-a", service, 80)
+			})
+			ginkgo.By("Creating client-b which should not be able to contact the server.", func() {
+				testCannotConnect(f, f.Namespace, "client-b", service, 80)
+			})
+
 		})
 
 		ginkgo.It("should enforce policy to allow traffic from pods within server namespace based on PodSelector [Feature:NetworkPolicy]", func() {
@@ -1386,30 +1444,47 @@ var _ = SIGDescribe("NetworkPolicy [LinuxOnly]", func() {
 func testCanConnect(f *framework.Framework, ns *v1.Namespace, podName string, service *v1.Service, targetPort int) {
 	ginkgo.By(fmt.Sprintf("Creating client pod %s that should successfully connect to %s.", podName, service.Name))
 	podClient := createNetworkClientPod(f, ns, podName, service, targetPort)
-	defer func() {
+	/**defer func() {
 		ginkgo.By(fmt.Sprintf("Cleaning up the pod %s", podClient.Name))
 		if err := f.ClientSet.CoreV1().Pods(ns.Name).Delete(podClient.Name, nil); err != nil {
 			e2elog.Failf("unable to cleanup pod %v: %v", podClient.Name, err)
 		}
-	}()
+	}()**/
 	checkConnectivity(f, ns, podClient, service)
+	ginkgo.By(fmt.Sprintf("Cleaning up the pod %s", podClient.Name))
+	if err := f.ClientSet.CoreV1().Pods(ns.Name).Delete(podClient.Name, nil); err != nil {
+		e2elog.Failf("unable to cleanup pod %v: %v", podClient.Name, err)
+	}
 }
 
 func testCannotConnect(f *framework.Framework, ns *v1.Namespace, podName string, service *v1.Service, targetPort int) {
 	ginkgo.By(fmt.Sprintf("Creating client pod %s that should not be able to connect to %s.", podName, service.Name))
-	podClient := createNetworkClientPod(f, ns, podName, service, targetPort)
-	defer func() {
+	podClient := createNetworkClientPodInfinite(f, ns, podName, service, targetPort)
+	/**defer func() {
 		ginkgo.By(fmt.Sprintf("Cleaning up the pod %s", podClient.Name))
 		if err := f.ClientSet.CoreV1().Pods(ns.Name).Delete(podClient.Name, nil); err != nil {
 			e2elog.Failf("unable to cleanup pod %v: %v", podClient.Name, err)
 		}
-	}()
+	}()**/
 	checkNoConnectivity(f, ns, podClient, service)
+	ginkgo.By(fmt.Sprintf("Cleaning up the pod %s", podClient.Name))
+	if err := f.ClientSet.CoreV1().Pods(ns.Name).Delete(podClient.Name, nil); err != nil {
+		e2elog.Failf("unable to cleanup pod %v: %v", podClient.Name, err)
+	}
 }
 
 func checkConnectivity(f *framework.Framework, ns *v1.Namespace, podClient *v1.Pod, service *v1.Service) {
 	e2elog.Logf("Waiting for %s to complete.", podClient.Name)
 	err := e2epod.WaitForPodNoLongerRunningInNamespace(f.ClientSet, podClient.Name, ns.Name)
+	logs, logErr := e2epod.GetPreviousPodLogs(f.ClientSet, f.Namespace.Name, podClient.Name, fmt.Sprintf("%s-container", podClient.Name))
+	if logErr != nil {
+		e2elog.Logf("Error getting container logs: %s", logErr)
+	} else {
+		e2elog.Logf("logs are: %s", logs)
+	}
+	if err != nil {
+		select{}
+	}
 	framework.ExpectNoError(err, "Pod did not finish as expected.")
 
 	e2elog.Logf("Waiting for %s to complete.", podClient.Name)
@@ -1449,13 +1524,17 @@ func checkNoConnectivity(f *framework.Framework, ns *v1.Namespace, podClient *v1
 	e2elog.Logf("Waiting for %s to complete.", podClient.Name)
 	err := e2epod.WaitForPodSuccessInNamespace(f.ClientSet, podClient.Name, ns.Name)
 
+
 	// We expect an error here since it's a cannot connect test.
 	// Dump debug information if the error was nil.
 	if err == nil {
+		e2elog.Logf("CONNECTIVITY WORKED IN CHECK NONE, err: %v", err)
 		// Collect pod logs when we see a failure.
 		logs, logErr := e2epod.GetPodLogs(f.ClientSet, f.Namespace.Name, podClient.Name, fmt.Sprintf("%s-container", podClient.Name))
 		if logErr != nil {
-			e2elog.Failf("Error getting container logs: %s", logErr)
+			e2elog.Logf("Error getting container logs: %s", logErr)
+			logs, logErr = e2epod.GetPreviousPodLogs(f.ClientSet, f.Namespace.Name, podClient.Name, fmt.Sprintf("%s-container", podClient.Name))
+			e2elog.Logf("Logs 2nd try: %s, %v", logs, logErr)
 		}
 
 		// Collect current NetworkPolicies applied in the test namespace.
@@ -1476,7 +1555,7 @@ func checkNoConnectivity(f *framework.Framework, ns *v1.Namespace, podClient *v1
 		}
 
 		e2elog.Failf("Pod %s should not be able to connect to service %s, but was able to connect.\nPod logs:\n%s\n\n Current NetworkPolicies:\n\t%v\n\n Pods:\n\t %v\n\n", podClient.Name, service.Name, logs, policies.Items, pods)
-
+		select{}
 		// Dump debug information for the test namespace.
 		framework.DumpDebugInfo(f.ClientSet, f.Namespace.Name)
 	}
@@ -1595,13 +1674,59 @@ func createNetworkClientPod(f *framework.Framework, namespace *v1.Namespace, pod
 					Args: []string{
 						"/bin/sh",
 						"-c",
-						fmt.Sprintf("for i in $(seq 1 5); do nc -vz -w 8 %s.%s %d && exit 0 || sleep 1; done; exit 1",
+						fmt.Sprintf("for i in $(seq 1 5); do nc -vz -w 8 %s.%s %d && exit 0 || echo 'NC FAILED' && sleep 1; done; sleep infinity",
 							targetService.Name, targetService.Namespace, targetPort),
 					},
 				},
 			},
 		},
 	})
+	logs, logErr := e2epod.GetPodLogs(f.ClientSet, f.Namespace.Name, pod.Name, fmt.Sprintf("%s-container", pod.Name))
+	if logErr != nil {
+		e2elog.Logf("Error getting container logs: %s", logErr)
+	} else {
+		e2elog.Logf("pod created: %v", pod)
+	}
+	e2elog.Logf("logs are: %s", logs)
+	framework.ExpectNoError(err)
+
+	return pod
+}
+
+// Create a client pod which will attempt a netcat to the provided service, on the specified port.
+// This client will attempt a one-shot connection, then die, without restarting the pod.
+// Test can then be asserted based on whether the pod quit with an error or not.
+func createNetworkClientPodInfinite(f *framework.Framework, namespace *v1.Namespace, podName string, targetService *v1.Service, targetPort int) *v1.Pod {
+	pod, err := f.ClientSet.CoreV1().Pods(namespace.Name).Create(&v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: podName + "-",
+			Labels: map[string]string{
+				"pod-name": podName,
+			},
+		},
+		Spec: v1.PodSpec{
+			RestartPolicy: v1.RestartPolicyNever,
+			Containers: []v1.Container{
+				{
+					Name:  fmt.Sprintf("%s-container", podName),
+					Image: imageutils.GetE2EImage(imageutils.BusyBox),
+					Args: []string{
+						"/bin/sh",
+						"-c",
+						fmt.Sprintf("for i in $(seq 1 5); do nc -vz -w 8 %s.%s %d && sleep 200 && exit 0 || echo 'NC FAILED' && sleep 1; done; exit 1",
+							targetService.Name, targetService.Namespace, targetPort),
+					},
+				},
+			},
+		},
+	})
+	logs, logErr := e2epod.GetPodLogs(f.ClientSet, f.Namespace.Name, pod.Name, fmt.Sprintf("%s-container", pod.Name))
+	if logErr != nil {
+		e2elog.Logf("Error getting container logs: %s", logErr)
+	} else {
+		e2elog.Logf("pod created: %v", pod)
+	}
+	e2elog.Logf("logs are: %s", logs)
 	framework.ExpectNoError(err)
 
 	return pod

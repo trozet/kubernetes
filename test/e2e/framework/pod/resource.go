@@ -605,6 +605,7 @@ func GetPreviousPodLogs(c clientset.Interface, namespace, podName, containerName
 
 // utility function for gomega Eventually
 func getPodLogsInternal(c clientset.Interface, namespace, podName, containerName string, previous bool) (string, error) {
+	e2elog.Logf("Trying to get logs from ns: %s, podName: %s, containerName: %s", namespace, podName, containerName)
 	logs, err := c.CoreV1().RESTClient().Get().
 		Resource("pods").
 		Namespace(namespace).
